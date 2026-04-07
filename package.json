@@ -1,0 +1,33 @@
+{
+  "name": "mac-claude-always-on",
+  "version": "1.0.0",
+  "description": "Keep Claude Code running on your Mac with the lid closed. Control it from your phone.",
+  "main": "main.js",
+  "scripts": {
+    "start": "node server.js",
+    "app": "electron ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dinnnng/mac-claude-always-on.git"
+  },
+  "keywords": [
+    "claude-code",
+    "remote-control",
+    "macos",
+    "mobile",
+    "terminal",
+    "electron",
+    "always-on"
+  ],
+  "author": "Dinnnng",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.0",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

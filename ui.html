@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Claude Remote</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --text2: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29922;
+}
+body {
+  background: var(--bg); color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  padding: 40px 24px 24px;
+  -webkit-app-region: drag;
+  user-select: none;
+}
+input, button { -webkit-app-region: no-drag; }
+
+h1 { font-size: 20px; font-weight: 700; margin-bottom: 24px; text-align: center; }
+
+.field { margin-bottom: 16px; }
+.field label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+.field input {
+  width: 100%; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); font-size: 14px; font-family: monospace;
+}
+.field input:focus { outline: none; border-color: var(--accent); }
+
+.dir-row { display: flex; gap: 8px; }
+.dir-row input { flex: 1; }
+.dir-row button {
+  padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text); font-size: 13px; cursor: pointer;
+  white-space: nowrap;
+}
+.dir-row button:hover { border-color: var(--accent); }
+
+.actions { display: flex; gap: 10px; margin-top: 24px; }
+.btn {
+  flex: 1; padding: 12px; border-radius: 10px; border: none;
+  font-size: 15px; font-weight: 600; cursor: pointer;
+  transition: opacity 0.15s;
+}
+.btn:active { opacity: 0.7; }
+.btn-start { background: var(--green); color: #fff; }
+.btn-stop { background: var(--red); color: #fff; }
+.btn:disabled { opacity: 0.3; cursor: default; }
+
+.status-card {
+  margin-top: 20px; padding: 16px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--border);
+}
+.status-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.status-row:last-child { margin-bottom: 0; }
+.status-label { font-size: 12px; color: var(--text2); }
+.status-value { font-size: 13px; font-family: monospace; }
+.status-value.running { color: var(--green); }
+.status-value.stopped { color: var(--text2); }
+
+.url-box {
+  margin-top: 12px; padding: 10px 10px 10px 12px; border-radius: 8px;
+  background: var(--bg); border: 1px solid var(--border);
+  font-family: monospace; font-size: 13px; color: var(--accent);
+  word-break: break-all;
+  -webkit-app-region: no-drag;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+}
+.url-text { flex: 1; user-select: text; cursor: text; }
+.copy-btn {
+  padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text2); font-size: 12px;
+  cursor: pointer; white-space: nowrap; flex-shrink: 0;
+}
+.copy-btn:hover { color: var(--text); border-color: var(--accent); }
+
+.hint { font-size: 11px; color: var(--text2); text-align: center; margin-top: 12px; }
+
+.hidden { display: none; }
+</style>
+</head>
+<body>
+
+<h1>Claude Remote</h1>
+
+<div id="config-section">
+  <div class="field">
+    <label>Password</label>
+    <input type="password" id="password" placeholder="Enter a password for remote access" value="">
+  </div>
+
+  <div class="field">
+    <label>Default Directory</label>
+    <div class="dir-row">
+      <input type="text" id="directory" placeholder="~/workspace">
+      <button onclick="browseDir()">Browse</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <label>Port</label>
+    <input type="number" id="port" value="3200" min="1024" max="65535">
+  </div>
+</div>
+
+<div class="actions">
+  <button class="btn btn-start" id="btn-start" onclick="startServer()">Start</button>
+  <button class="btn btn-stop" id="btn-stop" onclick="stopServer()" disabled>Stop</button>
+</div>
+
+<div class="status-card">
+  <div class="status-row">
+    <span class="status-label">Status</span>
+    <span class="status-value" id="status-text">Stopped</span>
+  </div>
+  <div class="status-row">
+    <span class="status-label">Sleep Prevention</span>
+    <span class="status-value" id="caff-text">Off</span>
+  </div>
+  <div id="url-section" class="hidden">
+    <div id="url-list"></div>
+    <div class="hint">Open this URL on your phone</div>
+  </div>
+</div>
+
+<script>
+const $id = (id) => document.getElementById(id);
+
+async function browseDir() {
+  const dir = await window.api.selectDirectory();
+  if (dir) $id('directory').value = dir;
+}
+
+async function startServer() {
+  const password = $id('password').value.trim();
+  if (!password) { $id('password').focus(); return; }
+  const port = parseInt($id('port').value) || 3200;
+
+  $id('btn-start').disabled = true;
+  $id('btn-start').textContent = 'Starting...';
+
+  const result = await window.api.startServer({ port, password });
+
+  if (result.error) {
+    alert('Failed: ' + result.error);
+    $id('btn-start').disabled = false;
+    $id('btn-start').textContent = 'Start';
+    return;
+  }
+
+  $id('btn-start').disabled = true;
+  $id('btn-start').textContent = 'Running';
+  $id('btn-stop').disabled = false;
+  $id('config-section').style.opacity = '0.5';
+  $id('config-section').style.pointerEvents = 'none';
+
+  $id('status-text').textContent = 'Running';
+  $id('status-text').className = 'status-value running';
+  $id('caff-text').textContent = 'Active';
+  $id('caff-text').style.color = 'var(--yellow)';
+
+  const urls = result.ips.map(ip => `http://${ip.address}:${result.port}`);
+  renderUrls(urls);
+  $id('url-section').classList.remove('hidden');
+}
+
+function renderUrls(urls) {
+  const list = $id('url-list');
+  list.innerHTML = '';
+  for (const url of urls) {
+    const box = document.createElement('div');
+    box.className = 'url-box';
+    box.innerHTML = `<span class="url-text">${url}</span><button class="copy-btn" onclick="copyUrl('${url}', this)">Copy</button>`;
+    list.appendChild(box);
+  }
+}
+
+function copyUrl(url, btn) {
+  navigator.clipboard.writeText(url).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  });
+}
+
+async function stopServer() {
+  $id('btn-stop').disabled = true;
+  $id('btn-stop').textContent = 'Stopping...';
+
+  await window.api.stopServer();
+
+  $id('btn-start').disabled = false;
+  $id('btn-start').textContent = 'Start';
+  $id('btn-stop').textContent = 'Stop';
+  $id('config-section').style.opacity = '';
+  $id('config-section').style.pointerEvents = '';
+
+  $id('status-text').textContent = 'Stopped';
+  $id('status-text').className = 'status-value stopped';
+  $id('caff-text').textContent = 'Off';
+  $id('caff-text').style.color = '';
+  $id('url-section').classList.add('hidden');
+}
+
+// Restore state on load
+window.api.getStatus().then(st => {
+  if (st.running) {
+    $id('btn-start').disabled = true;
+    $id('btn-start').textContent = 'Running';
+    $id('btn-stop').disabled = false;
+    $id('config-section').style.opacity = '0.5';
+    $id('config-section').style.pointerEvents = 'none';
+    $id('status-text').textContent = 'Running';
+    $id('status-text').className = 'status-value running';
+    if (st.info) {
+      const urls = st.info.ips.map(ip => `http://${ip.address}:${st.info.port}`);
+      renderUrls(urls);
+      $id('url-section').classList.remove('hidden');
+    }
+    if (st.caffeinate) {
+      $id('caff-text').textContent = 'Active';
+      $id('caff-text').style.color = 'var(--yellow)';
+    }
+  }
+});
+</script>
+</body>
+</html>

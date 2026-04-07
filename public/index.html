@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Claude Remote</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --bg: #0d1117; --surface: #161b22; --border: #30363d;
+  --text: #e6edf3; --text2: #8b949e; --accent: #58a6ff;
+  --green: #3fb950; --red: #f85149; --yellow: #d29922;
+}
+body { background:var(--bg); color:var(--text); font-family:-apple-system,system-ui,sans-serif; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+
+/* Header */
+.header { display:flex; align-items:center; justify-content:space-between; padding:8px 12px; background:var(--surface); border-bottom:1px solid var(--border); flex-shrink:0; }
+.header h1 { font-size:16px; font-weight:600; }
+.header-actions { display:flex; gap:8px; align-items:center; }
+.btn { padding:6px 12px; border-radius:6px; border:1px solid var(--border); background:var(--surface); color:var(--text); font-size:13px; cursor:pointer; white-space:nowrap; }
+.btn:active { opacity:0.7; }
+.btn-primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+.btn-danger { background:var(--red); color:#fff; border-color:var(--red); }
+.status-dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+.status-dot.running { background:var(--green); }
+.status-dot.stopped { background:var(--red); }
+
+/* Session list */
+.sessions-bar { display:flex; gap:4px; padding:6px 12px; background:var(--surface); border-bottom:1px solid var(--border); overflow-x:auto; flex-shrink:0; -webkit-overflow-scrolling:touch; }
+.session-tab { padding:5px 10px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--text2); font-size:12px; cursor:pointer; display:flex; align-items:center; gap:5px; white-space:nowrap; flex-shrink:0; }
+.session-tab.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.session-tab .close-btn { font-size:14px; line-height:1; opacity:0.6; margin-left:2px; }
+
+/* Terminal */
+.terminal-wrap { flex:1; overflow:hidden; position:relative; }
+#terminal { height:100%; }
+
+/* Input bar */
+.input-bar { padding:6px 8px; background:var(--surface); border-top:1px solid var(--border); flex-shrink:0; }
+.key-btns { display:flex; gap:4px; margin-bottom:6px; overflow-x:auto; }
+.key-btn { padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text2); font-size:13px; cursor:pointer; white-space:nowrap; flex-shrink:0; }
+.key-btn:active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.input-row { display:flex; gap:6px; }
+.input-row input { flex:1; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:14px; font-family:monospace; }
+.input-row input:focus { outline:none; border-color:var(--accent); }
+
+/* Modal */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center; padding:16px; }
+.modal-overlay.show { display:flex; }
+.modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:20px; width:100%; max-width:400px; }
+.modal h2 { font-size:18px; margin-bottom:16px; }
+.modal label { display:block; font-size:13px; color:var(--text2); margin-bottom:4px; margin-top:12px; }
+.modal input[type="text"] { width:100%; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:14px; }
+.modal input:focus { outline:none; border-color:var(--accent); }
+.modal-actions { display:flex; gap:8px; margin-top:20px; justify-content:flex-end; }
+.toggle-row { display:flex; align-items:center; justify-content:space-between; margin-top:12px; }
+.toggle { width:44px; height:24px; border-radius:12px; background:var(--border); position:relative; cursor:pointer; border:none; }
+.toggle.on { background:var(--accent); }
+.toggle::after { content:''; width:20px; height:20px; border-radius:50%; background:#fff; position:absolute; top:2px; left:2px; transition:left .2s; }
+.toggle.on::after { left:22px; }
+
+/* Empty state */
+.empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; height:100%; color:var(--text2); gap:12px; }
+.empty-state .icon { font-size:48px; }
+
+/* Responsive */
+@media (max-width:480px) {
+  .header h1 { font-size:14px; }
+  .btn { padding:5px 8px; font-size:12px; }
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Claude Remote</h1>
+  <div class="header-actions">
+    <span id="caffeinate-status" style="font-size:12px;color:var(--text2)"></span>
+    <button class="btn" id="btn-caffeinate" onclick="toggleCaffeinate()">&#9889;</button>
+    <button class="btn btn-primary" onclick="showNewModal()">+ New</button>
+  </div>
+</div>
+
+<div class="sessions-bar" id="sessions-bar"></div>
+
+<div class="terminal-wrap" id="terminal-wrap">
+  <div class="empty-state" id="empty-state">
+    <div class="icon">&#128187;</div>
+    <div>No active session</div>
+    <div style="font-size:13px">Tap <b>+ New</b> to start Claude Code</div>
+  </div>
+  <div id="terminal" style="display:none"></div>
+</div>
+
+<div class="input-bar">
+  <div class="key-btns">
+    <button class="key-btn" onclick="sendKey('\x1b[A')">&#9650;</button>
+    <button class="key-btn" onclick="sendKey('\x1b[B')">&#9660;</button>
+    <button class="key-btn" onclick="sendKey('\x1b[D')">&#9664;</button>
+    <button class="key-btn" onclick="sendKey('\x1b[C')">&#9654;</button>
+    <button class="key-btn" onclick="sendKey('\t')">Tab</button>
+    <button class="key-btn" onclick="sendKey('\x03')">Ctrl+C</button>
+    <button class="key-btn" onclick="sendKey('\x1b')">Esc</button>
+  </div>
+  <div class="input-row">
+    <input type="text" id="cmd-input" placeholder="Type here and press Enter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <button class="btn" onclick="sendInput()">Send</button>
+  </div>
+</div>
+
+<!-- New Session Modal -->
+<div class="modal-overlay" id="new-modal">
+  <div class="modal">
+    <h2>New Session</h2>
+    <label>Working Directory</label>
+    <input type="text" id="new-dir" placeholder="~/workspace/my-project">
+    <div id="dir-suggestions" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px"></div>
+    <label>Initial Prompt (optional)</label>
+    <input type="text" id="new-prompt" placeholder="e.g. Refactor all components to TypeScript">
+    <div class="toggle-row">
+      <span style="font-size:13px">Auto Mode (skip permissions)</span>
+      <button class="toggle" id="new-automode" onclick="this.classList.toggle('on')"></button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" onclick="hideNewModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="createSession()">Start</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script>
+// --- Auth ---
+let PASSWORD = localStorage.getItem('claude-remote-pass') || '';
+if (!PASSWORD) {
+  PASSWORD = prompt('Enter password:') || '';
+  localStorage.setItem('claude-remote-pass', PASSWORD);
+}
+const AUTH = 'Basic ' + btoa('user:' + PASSWORD);
+
+function api(method, path, body) {
+  const opts = { method, headers: { 'Authorization': AUTH, 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  return fetch('/api' + path, opts).then(r => {
+    if (r.status === 401) { localStorage.removeItem('claude-remote-pass'); location.reload(); }
+    return r.json();
+  });
+}
+
+// --- Terminal ---
+const term = new window.Terminal({
+  fontSize: 14,
+  fontFamily: 'Menlo, Monaco, Consolas, monospace',
+  theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#58a6ff' },
+  cursorBlink: true,
+  scrollback: 5000,
+  convertEol: true,
+});
+const fitAddon = new window.FitAddon.FitAddon();
+term.loadAddon(fitAddon);
+
+let currentSessionId = null;
+let ws = null;
+let sessionsData = [];
+let caffeinateOn = false;
+
+// --- Mount terminal ---
+const termEl = document.getElementById('terminal');
+const emptyEl = document.getElementById('empty-state');
+term.open(termEl);
+
+function showTerminal() {
+  termEl.style.display = 'block';
+  emptyEl.style.display = 'none';
+  setTimeout(() => fitAddon.fit(), 50);
+}
+function hideTerminal() {
+  termEl.style.display = 'none';
+  emptyEl.style.display = 'flex';
+}
+
+// Resize
+window.addEventListener('resize', () => { if (currentSessionId) fitAddon.fit(); });
+new ResizeObserver(() => { if (currentSessionId) fitAddon.fit(); }).observe(termEl);
+
+// --- WebSocket ---
+function connectSession(id) {
+  if (ws) { ws.close(); ws = null; }
+  currentSessionId = id;
+  term.clear();
+  term.reset();
+  showTerminal();
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws?session=${id}&token=${encodeURIComponent(PASSWORD)}`);
+  ws.onmessage = (e) => term.write(e.data);
+  ws.onclose = () => { /* will reconnect on tab switch */ };
+  ws.onerror = () => {};
+
+  // Resize PTY
+  setTimeout(() => {
+    fitAddon.fit();
+    api('POST', `/sessions/${id}/resize`, { cols: term.cols, rows: term.rows });
+  }, 100);
+
+  updateTabs();
+}
+
+// Terminal input → WS
+term.onData((data) => {
+  if (ws && ws.readyState === 1) ws.send(data);
+});
+
+// --- Sessions ---
+async function loadSessions() {
+  sessionsData = await api('GET', '/sessions');
+  updateTabs();
+}
+
+function updateTabs() {
+  const bar = document.getElementById('sessions-bar');
+  bar.innerHTML = '';
+  for (const s of sessionsData) {
+    const tab = document.createElement('div');
+    tab.className = 'session-tab' + (s.id === currentSessionId ? ' active' : '');
+    const dirName = s.directory.split('/').filter(Boolean).pop() || s.directory;
+    tab.innerHTML = `<span class="status-dot ${s.status}"></span>${dirName}<span class="close-btn" data-id="${s.id}">&times;</span>`;
+    tab.onclick = (e) => {
+      if (e.target.classList.contains('close-btn')) {
+        killSession(e.target.dataset.id);
+      } else {
+        connectSession(s.id);
+      }
+    };
+    bar.appendChild(tab);
+  }
+}
+
+async function killSession(id) {
+  if (!confirm('Stop this session?')) return;
+  await api('DELETE', `/sessions/${id}`);
+  if (id === currentSessionId) {
+    if (ws) ws.close();
+    currentSessionId = null;
+    hideTerminal();
+  }
+  await loadSessions();
+}
+
+// --- New session ---
+async function showNewModal() {
+  document.getElementById('new-modal').classList.add('show');
+  document.getElementById('new-dir').focus();
+  // Load directory suggestions
+  const data = await api('GET', '/directories');
+  renderDirSuggestions(data.entries, data.base);
+}
+
+function renderDirSuggestions(entries, base) {
+  const el = document.getElementById('dir-suggestions');
+  el.innerHTML = '';
+  // Up button if not home
+  if (base !== (base.split('/').slice(0,3).join('/'))) {
+    const up = document.createElement('button');
+    up.className = 'btn'; up.style.fontSize = '12px'; up.style.padding = '4px 8px';
+    up.textContent = '..';
+    up.onclick = async () => {
+      const parent = base.split('/').slice(0,-1).join('/') || '/';
+      const data = await api('GET', `/directories?path=${encodeURIComponent(parent)}`);
+      renderDirSuggestions(data.entries, data.base);
+    };
+    el.appendChild(up);
+  }
+  for (const e of entries) {
+    const btn = document.createElement('button');
+    btn.className = 'btn'; btn.style.fontSize = '12px'; btn.style.padding = '4px 8px';
+    btn.textContent = e.name;
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      document.getElementById('new-dir').value = e.path;
+      // Drill into subdirectory
+      const data = await api('GET', `/directories?path=${encodeURIComponent(e.path)}`);
+      renderDirSuggestions(data.entries, data.base);
+    };
+    el.appendChild(btn);
+  }
+}
+function hideNewModal() { document.getElementById('new-modal').classList.remove('show'); }
+
+async function createSession() {
+  const dir = document.getElementById('new-dir').value.trim() || '~';
+  const prompt = document.getElementById('new-prompt').value.trim();
+  const autoMode = document.getElementById('new-automode').classList.contains('on');
+
+  hideNewModal();
+  const session = await api('POST', '/sessions', { directory: dir === '~' ? undefined : dir, autoMode });
+  sessionsData.push(session);
+  connectSession(session.id);
+
+  // Send initial prompt after a delay
+  if (prompt) {
+    setTimeout(() => {
+      if (ws && ws.readyState === 1) ws.send(prompt + '\r');
+    }, 2000);
+  }
+}
+
+// --- Input bar ---
+const cmdInput = document.getElementById('cmd-input');
+cmdInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); sendInput(); }
+});
+
+function sendInput() {
+  const val = cmdInput.value;
+  if (!val || !ws || ws.readyState !== 1) return;
+  ws.send(val + '\r');
+  cmdInput.value = '';
+}
+
+function sendKey(key) {
+  if (ws && ws.readyState === 1) ws.send(key);
+}
+
+// --- Caffeinate ---
+async function loadStatus() {
+  const st = await api('GET', '/status');
+  caffeinateOn = st.caffeinate === 'running';
+  updateCaffeinateUI();
+}
+
+function updateCaffeinateUI() {
+  const btn = document.getElementById('btn-caffeinate');
+  const st = document.getElementById('caffeinate-status');
+  if (caffeinateOn) {
+    btn.style.background = 'var(--yellow)';
+    btn.style.borderColor = 'var(--yellow)';
+    st.textContent = 'Awake';
+  } else {
+    btn.style.background = '';
+    btn.style.borderColor = '';
+    st.textContent = '';
+  }
+}
+
+async function toggleCaffeinate() {
+  if (caffeinateOn) {
+    await api('POST', '/caffeinate/stop');
+    caffeinateOn = false;
+  } else {
+    await api('POST', '/caffeinate/start');
+    caffeinateOn = true;
+  }
+  updateCaffeinateUI();
+}
+
+// --- Event stream ---
+function connectEvents() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const evtWs = new WebSocket(`${proto}://${location.host}/ws/events?token=${encodeURIComponent(PASSWORD)}`);
+  evtWs.onmessage = (e) => {
+    const evt = JSON.parse(e.data);
+    if (evt.type === 'session_created' || evt.type === 'session_stopped' || evt.type === 'session_deleted') {
+      loadSessions();
+    }
+  };
+  evtWs.onclose = () => setTimeout(connectEvents, 3000);
+}
+
+// --- Init ---
+(async () => {
+  await loadSessions();
+  await loadStatus();
+  connectEvents();
+  if (sessionsData.length > 0) {
+    const running = sessionsData.find(s => s.status === 'running');
+    if (running) connectSession(running.id);
+  }
+})();
+</script>
+</body>
+</html>
