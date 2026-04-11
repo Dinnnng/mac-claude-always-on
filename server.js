@@ -44,13 +44,14 @@ function checkWsAuth(req) {
 const sessions = new Map();
 let sessionCounter = 0;
 
-function createSession(directory, autoMode = false) {
+function createSession(directory, autoMode = false, resumeId = null) {
   const id = String(++sessionCounter);
   let dir = directory || os.homedir();
   if (dir.startsWith('~')) dir = dir.replace('~', os.homedir());
 
   const args = [];
   if (autoMode) args.push('--dangerously-skip-permissions');
+  if (resumeId) args.push('--resume', resumeId);
 
   const ptyProcess = pty.spawn('claude', args, {
     name: 'xterm-256color',
@@ -64,6 +65,7 @@ function createSession(directory, autoMode = false) {
     id,
     directory: dir,
     autoMode,
+    resumeId: resumeId || null,
     createdAt: new Date().toISOString(),
     status: 'running',
     ptyProcess,
@@ -103,6 +105,7 @@ function sessionToJSON(s) {
     id: s.id,
     directory: s.directory,
     autoMode: s.autoMode,
+    resumeId: s.resumeId || null,
     status: s.status,
     createdAt: s.createdAt,
     exitCode: s.exitCode,
@@ -150,9 +153,9 @@ app.use('/api', (req, res, next) => {
 
 // Sessions API
 app.post('/api/sessions', (req, res) => {
-  const { directory, autoMode } = req.body;
+  const { directory, autoMode, resumeId } = req.body;
   try {
-    const session = createSession(directory, autoMode);
+    const session = createSession(directory, autoMode, resumeId);
     res.json(sessionToJSON(session));
   } catch (err) {
     res.status(500).json({ error: err.message });

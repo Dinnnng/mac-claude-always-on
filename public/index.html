@@ -27,6 +27,42 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
 .status-dot.running { background:var(--green); }
 .status-dot.stopped { background:var(--red); }
 
+/* Activity indicator in the header — shows whether the terminal is
+   currently receiving data from the backend (i.e. Claude is talking) */
+.activity-dot {
+  width:10px; height:10px; border-radius:50%; display:inline-block;
+  background:#30363d; transition:background .2s, box-shadow .2s;
+  flex-shrink:0;
+}
+.activity-dot.active {
+  background:var(--green);
+  box-shadow:0 0 8px var(--green);
+  animation:activity-pulse 1s ease-in-out infinite;
+}
+@keyframes activity-pulse {
+  0%,100% { opacity:1; }
+  50%     { opacity:0.35; }
+}
+
+/* Floating "new output" pill — appears when the user has scrolled up
+   and new data arrives. Tap it to jump back to the bottom. */
+.scroll-pill {
+  position:absolute; right:12px; bottom:12px; z-index:10;
+  background:var(--accent); color:#fff;
+  padding:9px 16px; border-radius:20px;
+  font-size:13px; font-weight:600;
+  box-shadow:0 4px 14px rgba(0,0,0,0.5);
+  cursor:pointer; display:none;
+  user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent;
+  border:none;
+}
+.scroll-pill.show { display:block; animation:pill-in .18s ease-out; }
+.scroll-pill:active { transform:scale(0.94); }
+@keyframes pill-in {
+  from { opacity:0; transform:translateY(6px); }
+  to   { opacity:1; transform:translateY(0); }
+}
+
 /* Session list */
 .sessions-bar { display:flex; gap:4px; padding:6px 12px; background:var(--surface); border-bottom:1px solid var(--border); overflow-x:auto; flex-shrink:0; -webkit-overflow-scrolling:touch; }
 .session-tab { padding:5px 10px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--text2); font-size:12px; cursor:pointer; display:flex; align-items:center; gap:5px; white-space:nowrap; flex-shrink:0; }
@@ -35,13 +71,42 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
 
 /* Terminal */
 .terminal-wrap { flex:1; overflow:hidden; position:relative; }
-#terminal { height:100%; }
+#terminal { height:100%; touch-action:pan-y; }
+
+/* Enable momentum scrolling and GPU compositing for xterm's internal viewport.
+   xterm renders its scrollable area into .xterm-viewport; without these hints
+   mobile Safari/Chrome paints every frame on the main thread → laggy. */
+.xterm .xterm-viewport {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  will-change: transform;
+}
+.xterm .xterm-screen { will-change: transform; }
 
 /* Input bar */
 .input-bar { padding:6px 8px; background:var(--surface); border-top:1px solid var(--border); flex-shrink:0; }
-.key-btns { display:flex; gap:4px; margin-bottom:6px; overflow-x:auto; }
-.key-btn { padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text2); font-size:13px; cursor:pointer; white-space:nowrap; flex-shrink:0; }
-.key-btn:active { background:var(--accent); color:#fff; border-color:var(--accent); }
+
+/* Primary nav row — big arrow keys + Enter for Claude menu selection */
+.nav-row { display:flex; gap:6px; margin-bottom:6px; }
+.nav-btn {
+  flex:1; min-width:0; padding:12px 0; border-radius:8px;
+  border:1px solid var(--border); background:var(--bg); color:var(--text);
+  font-size:18px; line-height:1; cursor:pointer;
+  user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent;
+  transition:background .08s, border-color .08s, transform .08s;
+}
+.nav-btn.pressed { background:var(--accent); color:#fff; border-color:var(--accent); transform:scale(0.96); }
+.nav-btn.enter { flex:1.4; font-size:14px; font-weight:600; }
+
+/* Secondary small key row (tab / esc / ctrl-c / shift-tab) */
+.key-btns { display:flex; gap:4px; margin-bottom:6px; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+.key-btn {
+  padding:6px 10px; border-radius:6px; border:1px solid var(--border);
+  background:var(--bg); color:var(--text2); font-size:13px; cursor:pointer;
+  white-space:nowrap; flex-shrink:0;
+  user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent;
+}
+.key-btn.pressed { background:var(--accent); color:#fff; border-color:var(--accent); }
 .input-row { display:flex; gap:6px; }
 .input-row input { flex:1; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:14px; font-family:monospace; }
 .input-row input:focus { outline:none; border-color:var(--accent); }
@@ -77,8 +142,10 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
 <div class="header">
   <h1>Claude Remote</h1>
   <div class="header-actions">
+    <span id="activity-dot" class="activity-dot" title="Idle"></span>
     <span id="caffeinate-status" style="font-size:12px;color:var(--text2)"></span>
     <button class="btn" id="btn-caffeinate" onclick="toggleCaffeinate()">&#9889;</button>
+    <button class="btn" id="btn-refresh" onclick="refreshSession()" title="Refresh terminal" style="display:none">&#8635;</button>
     <button class="btn btn-primary" onclick="showNewModal()">+ New</button>
   </div>
 </div>
@@ -92,17 +159,22 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
     <div style="font-size:13px">Tap <b>+ New</b> to start Claude Code</div>
   </div>
   <div id="terminal" style="display:none"></div>
+  <button type="button" class="scroll-pill" id="scroll-pill" onclick="jumpToBottom()">↓ 新输出</button>
 </div>
 
 <div class="input-bar">
+  <div class="nav-row">
+    <button class="nav-btn" data-key="\x1b[D" data-repeat="1">&#9664;</button>
+    <button class="nav-btn" data-key="\x1b[A" data-repeat="1">&#9650;</button>
+    <button class="nav-btn" data-key="\x1b[B" data-repeat="1">&#9660;</button>
+    <button class="nav-btn" data-key="\x1b[C" data-repeat="1">&#9654;</button>
+    <button class="nav-btn enter" data-key="\r">Enter</button>
+  </div>
   <div class="key-btns">
-    <button class="key-btn" onclick="sendKey('\x1b[A')">&#9650;</button>
-    <button class="key-btn" onclick="sendKey('\x1b[B')">&#9660;</button>
-    <button class="key-btn" onclick="sendKey('\x1b[D')">&#9664;</button>
-    <button class="key-btn" onclick="sendKey('\x1b[C')">&#9654;</button>
-    <button class="key-btn" onclick="sendKey('\t')">Tab</button>
-    <button class="key-btn" onclick="sendKey('\x03')">Ctrl+C</button>
-    <button class="key-btn" onclick="sendKey('\x1b')">Esc</button>
+    <button class="key-btn" data-key="\t">Tab</button>
+    <button class="key-btn" data-key="\x1b[Z">Shift+Tab</button>
+    <button class="key-btn" data-key="\x1b">Esc</button>
+    <button class="key-btn" data-key="\x03">Ctrl+C</button>
   </div>
   <div class="input-row">
     <input type="text" id="cmd-input" placeholder="Type here and press Enter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
@@ -117,6 +189,8 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
     <label>Working Directory</label>
     <input type="text" id="new-dir" placeholder="~/workspace/my-project">
     <div id="dir-suggestions" style="margin-top:6px;display:flex;flex-wrap:wrap;gap:6px"></div>
+    <label>Resume ID (optional)</label>
+    <input type="text" id="new-resume" placeholder="Paste session ID to resume a conversation" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
     <label>Initial Prompt (optional)</label>
     <input type="text" id="new-prompt" placeholder="e.g. Refactor all components to TypeScript">
     <div class="toggle-row">
@@ -132,6 +206,8 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
 
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.min.js"></script>
 <script>
 // --- Auth ---
 let PASSWORD = localStorage.getItem('claude-remote-pass') || '';
@@ -155,9 +231,11 @@ const term = new window.Terminal({
   fontSize: 14,
   fontFamily: 'Menlo, Monaco, Consolas, monospace',
   theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#58a6ff' },
-  cursorBlink: true,
-  scrollback: 5000,
+  cursorBlink: false,          // disable blink → fewer redraws on mobile
+  scrollback: 3000,            // trimmed from 5000 to reduce memory/scroll work
   convertEol: true,
+  fastScrollModifier: 'shift',
+  smoothScrollDuration: 0,     // no animation on scroll → instant
 });
 const fitAddon = new window.FitAddon.FitAddon();
 term.loadAddon(fitAddon);
@@ -172,19 +250,93 @@ const termEl = document.getElementById('terminal');
 const emptyEl = document.getElementById('empty-state');
 term.open(termEl);
 
+// Load the fastest renderer available: WebGL first, fall back to Canvas, else DOM.
+// The DOM renderer is orders of magnitude slower on mobile — it creates one DOM
+// node per character cell and repaints on every scroll.
+(function loadFastRenderer() {
+  try {
+    if (window.WebglAddon && window.WebglAddon.WebglAddon) {
+      const webgl = new window.WebglAddon.WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+      console.log('[term] using WebGL renderer');
+      return;
+    }
+  } catch (e) {
+    console.warn('[term] WebGL addon failed, falling back to Canvas:', e);
+  }
+  try {
+    if (window.CanvasAddon && window.CanvasAddon.CanvasAddon) {
+      term.loadAddon(new window.CanvasAddon.CanvasAddon());
+      console.log('[term] using Canvas renderer');
+      return;
+    }
+  } catch (e) {
+    console.warn('[term] Canvas addon failed, falling back to DOM:', e);
+  }
+  console.log('[term] using default DOM renderer');
+})();
+
 function showTerminal() {
   termEl.style.display = 'block';
   emptyEl.style.display = 'none';
+  document.getElementById('btn-refresh').style.display = '';
   setTimeout(() => fitAddon.fit(), 50);
 }
 function hideTerminal() {
   termEl.style.display = 'none';
   emptyEl.style.display = 'flex';
+  document.getElementById('btn-refresh').style.display = 'none';
+}
+
+function refreshSession() {
+  if (!currentSessionId) return;
+  const btn = document.getElementById('btn-refresh');
+  btn.textContent = '...';
+  btn.disabled = true;
+  connectSession(currentSessionId);
+  setTimeout(() => {
+    btn.textContent = '\u21BB';
+    btn.disabled = false;
+  }, 800);
 }
 
 // Resize
 window.addEventListener('resize', () => { if (currentSessionId) fitAddon.fit(); });
 new ResizeObserver(() => { if (currentSessionId) fitAddon.fit(); }).observe(termEl);
+
+// --- Activity indicator & smart auto-scroll ---
+const activityDot = document.getElementById('activity-dot');
+const scrollPill = document.getElementById('scroll-pill');
+let activityTimer = null;
+
+function markActivity() {
+  activityDot.classList.add('active');
+  activityDot.title = 'Receiving...';
+  if (activityTimer) clearTimeout(activityTimer);
+  activityTimer = setTimeout(() => {
+    activityDot.classList.remove('active');
+    activityDot.title = 'Idle';
+  }, 1500);
+}
+
+function isAtBottom() {
+  // xterm public buffer API: viewportY is the top of the visible area,
+  // baseY is the top of the most recent screen. Equal ⇒ at bottom.
+  const buf = term.buffer.active;
+  return buf.viewportY >= buf.baseY;
+}
+
+function jumpToBottom() {
+  term.scrollToBottom();
+  scrollPill.classList.remove('show');
+}
+window.jumpToBottom = jumpToBottom;
+
+// If the user manually scrolls back to the bottom, hide the pill.
+term.onScroll(() => {
+  if (isAtBottom()) scrollPill.classList.remove('show');
+});
 
 // --- WebSocket ---
 function connectSession(id) {
@@ -192,12 +344,28 @@ function connectSession(id) {
   currentSessionId = id;
   term.clear();
   term.reset();
+  scrollPill.classList.remove('show');
   showTerminal();
 
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?session=${id}&token=${encodeURIComponent(PASSWORD)}`);
-  ws.onmessage = (e) => term.write(e.data);
-  ws.onclose = () => { /* will reconnect on tab switch */ };
+  ws.onmessage = (e) => {
+    const atBottomBefore = isAtBottom();
+    term.write(e.data);
+    // If the user was scrolled up reading history when new data arrived,
+    // surface a "new output" pill so they know there's more below.
+    // (When at bottom, xterm auto-scrolls — no pill needed.)
+    if (!atBottomBefore && !scrollPill.classList.contains('show')) {
+      scrollPill.classList.add('show');
+      vibrate(15);
+    }
+    markActivity();
+  };
+  ws.onclose = () => {
+    if (activityTimer) { clearTimeout(activityTimer); activityTimer = null; }
+    activityDot.classList.remove('active');
+    activityDot.title = 'Disconnected';
+  };
   ws.onerror = () => {};
 
   // Resize PTY
@@ -288,20 +456,29 @@ function renderDirSuggestions(entries, base) {
     el.appendChild(btn);
   }
 }
-function hideNewModal() { document.getElementById('new-modal').classList.remove('show'); }
+function hideNewModal() {
+  document.getElementById('new-modal').classList.remove('show');
+  // Clear resume ID on close so a Cancel doesn't silently resume next time
+  document.getElementById('new-resume').value = '';
+}
 
 async function createSession() {
   const dir = document.getElementById('new-dir').value.trim() || '~';
   const prompt = document.getElementById('new-prompt').value.trim();
+  const resumeId = document.getElementById('new-resume').value.trim();
   const autoMode = document.getElementById('new-automode').classList.contains('on');
 
   hideNewModal();
-  const session = await api('POST', '/sessions', { directory: dir === '~' ? undefined : dir, autoMode });
+  const session = await api('POST', '/sessions', {
+    directory: dir === '~' ? undefined : dir,
+    autoMode,
+    resumeId: resumeId || undefined,
+  });
   sessionsData.push(session);
   connectSession(session.id);
 
-  // Send initial prompt after a delay
-  if (prompt) {
+  // Send initial prompt after a delay (resume opens an existing conversation, so skip)
+  if (prompt && !resumeId) {
     setTimeout(() => {
       if (ws && ws.readyState === 1) ws.send(prompt + '\r');
     }, 2000);
@@ -324,6 +501,61 @@ function sendInput() {
 function sendKey(key) {
   if (ws && ws.readyState === 1) ws.send(key);
 }
+
+// Decode data-key escape strings like "\x1b[A" or "\r" into actual characters
+function decodeKey(s) {
+  return s
+    .replace(/\\x([0-9a-f]{2})/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\r/g, '\r')
+    .replace(/\\n/g, '\n')
+    .replace(/\\t/g, '\t');
+}
+
+function vibrate(ms) {
+  if (navigator.vibrate) { try { navigator.vibrate(ms); } catch {} }
+}
+
+// Wire up any button with data-key for: immediate send, visual press state,
+// haptic feedback, and (if data-repeat) long-press auto-repeat.
+function wireKeyButton(btn) {
+  const key = decodeKey(btn.dataset.key || '');
+  const canRepeat = btn.dataset.repeat === '1';
+  if (!key) return;
+
+  let holdTimer = null;
+  let repeatTimer = null;
+
+  const press = (e) => {
+    e.preventDefault();
+    btn.classList.add('pressed');
+    vibrate(10);
+    sendKey(key);
+    if (canRepeat) {
+      holdTimer = setTimeout(() => {
+        repeatTimer = setInterval(() => sendKey(key), 80);
+      }, 300);
+    }
+    // Capture so we still get pointerup if the finger slides off the button
+    if (e.pointerId !== undefined && btn.setPointerCapture) {
+      try { btn.setPointerCapture(e.pointerId); } catch {}
+    }
+  };
+
+  const release = () => {
+    btn.classList.remove('pressed');
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    if (repeatTimer) { clearInterval(repeatTimer); repeatTimer = null; }
+  };
+
+  btn.addEventListener('pointerdown', press);
+  btn.addEventListener('pointerup', release);
+  btn.addEventListener('pointercancel', release);
+  btn.addEventListener('pointerleave', release);
+  // Swallow the synthesized click so it doesn't steal focus from the text input
+  btn.addEventListener('click', (e) => e.preventDefault());
+}
+
+document.querySelectorAll('[data-key]').forEach(wireKeyButton);
 
 // --- Caffeinate ---
 async function loadStatus() {
