@@ -36,6 +36,9 @@ const BUFFER_SIZE = 100 * 1024; // 100KB scrollback per session
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || '';
 const DASHSCOPE_MODEL = process.env.DASHSCOPE_MODEL || 'qwen-flash';
 const DASHSCOPE_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
+const DASHSCOPE_TTS_MODEL = process.env.DASHSCOPE_TTS_MODEL || 'qwen-tts';
+const DASHSCOPE_TTS_VOICE = process.env.DASHSCOPE_TTS_VOICE || 'Cherry';
+const DASHSCOPE_TTS_ENDPOINT = 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
 
 // --- Auth ---
 function checkAuth(req, res) {
@@ -239,23 +242,45 @@ function extractLastClaudeMessage(rawBuf) {
   const text = stripAnsi(rawBuf.toString('utf-8')).replace(/\r/g, '');
   const lines = text.split('\n');
 
-  let startIdx = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    // `●` may be preceded by whitespace or color reset. After stripAnsi it's
-    // usually the first non-space char of the line.
-    if (/^\s*●/.test(lines[i])) { startIdx = i; break; }
-  }
-
   const cleanLine = (l) =>
     l.replace(/^[\s│╭╰╮╯─┌┐└┘├┤┬┴┼]+/, '')
      .replace(/[\s│]+$/, '')
      .trim();
 
+  // Lines that are pure TUI chrome or status noise — never worth speaking.
+  // Covers update banners, context/usage footers, shortcut hints, and the
+  // spinner/working lines Claude Code prints while thinking.
+  const NOISE = [
+    /^[─╭╰╮╯│=]+$/,
+    /update (available|failed)/i,
+    /auto[- ]?update/i,
+    /claude doctor/i,
+    /context left until/i,
+    /auto-?compact/i,
+    /tokens?\s*(left|used|remaining)/i,
+    /\? for shortcuts/i,
+    /shift ?\+ ?tab to/i,
+    /bypass permissions/i,
+    /^[✓✔✗✘●○◐◑◒◓◔◕⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*(working|thinking|loading|compacting)/i,
+    /^\s*esc to interrupt/i,
+    /^>\s*/,                             // user input echo
+    /^\d+\s+lines?\s+(selected|hidden)/i,
+  ];
+  const isNoise = (l) => !l || NOISE.some(re => re.test(l));
+
+  // Search for last `●` bullet that is NOT a status/noise line. Claude Code
+  // also prefixes some footer items with `●`, so we skip those.
+  let startIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!/^\s*●/.test(lines[i])) continue;
+    const content = cleanLine(lines[i]).replace(/^●\s*/, '');
+    if (isNoise(content)) continue;
+    startIdx = i;
+    break;
+  }
+
   if (startIdx === -1) {
-    // No bullet — take the last 15 meaningful lines as a fallback.
-    const meaningful = lines
-      .map(cleanLine)
-      .filter(l => l && !/^[─╭╰╮╯│=]+$/.test(l) && !l.startsWith('>'));
+    const meaningful = lines.map(cleanLine).filter(l => !isNoise(l));
     return meaningful.slice(-15).join('\n').trim();
   }
 
@@ -269,7 +294,7 @@ function extractLastClaudeMessage(rawBuf) {
 
   const segment = lines.slice(startIdx, endIdx)
     .map(cleanLine)
-    .filter(l => l && !/^[─╭╰╮╯│=]+$/.test(l));
+    .filter(l => !isNoise(l));
 
   // Drop the leading `●` glyph on the first line.
   if (segment.length > 0) segment[0] = segment[0].replace(/^●\s*/, '');
@@ -321,6 +346,59 @@ app.post('/api/summarize', async (req, res) => {
     const data = await resp.json();
     const summary = data.choices?.[0]?.message?.content?.trim() || '';
     res.json({ summary, model: DASHSCOPE_MODEL });
+  } catch (err) {
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
+// --- TTS via DashScope (Qwen-TTS). Returns raw audio bytes. ---
+app.post('/api/tts', async (req, res) => {
+  if (!DASHSCOPE_API_KEY) {
+    return res.status(400).json({ error: 'DASHSCOPE_API_KEY not set in .env' });
+  }
+  const { text, voice } = req.body || {};
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: 'Missing text' });
+  }
+  try {
+    const resp = await fetch(DASHSCOPE_TTS_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + DASHSCOPE_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: DASHSCOPE_TTS_MODEL,
+        input: {
+          text: text.slice(0, 2000),
+          voice: voice || DASHSCOPE_TTS_VOICE,
+        },
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      return res.status(502).json({ error: `DashScope ${resp.status}: ${body.slice(0, 400)}` });
+    }
+    const data = await resp.json();
+    const audio = data.output?.audio;
+    const url = audio?.url;
+    const b64 = audio?.data;
+    let buf, contentType = 'audio/wav';
+    if (url) {
+      const a = await fetch(url);
+      if (!a.ok) {
+        return res.status(502).json({ error: `audio fetch ${a.status}` });
+      }
+      contentType = a.headers.get('content-type') || contentType;
+      buf = Buffer.from(await a.arrayBuffer());
+    } else if (b64) {
+      buf = Buffer.from(b64, 'base64');
+    } else {
+      return res.status(502).json({ error: 'No audio in response', raw: JSON.stringify(data).slice(0, 400) });
+    }
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(buf);
   } catch (err) {
     res.status(500).json({ error: String(err.message || err) });
   }

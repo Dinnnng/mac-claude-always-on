@@ -84,7 +84,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
 .xterm .xterm-screen { will-change: transform; }
 
 /* Input bar */
-.input-bar { padding:6px 8px; background:var(--surface); border-top:1px solid var(--border); flex-shrink:0; }
+.input-bar { padding:6px 8px calc(max(env(safe-area-inset-bottom), 10px) + 6px); background:var(--surface); border-top:1px solid var(--border); flex-shrink:0; }
 
 /* Primary nav row — big arrow keys + Enter for Claude menu selection */
 .nav-row { display:flex; gap:6px; margin-bottom:6px; }
@@ -99,7 +99,11 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
 .nav-btn.enter { flex:1.4; font-size:14px; font-weight:600; }
 
 /* Secondary small key row (tab / esc / ctrl-c / shift-tab) */
-.key-btns { display:flex; gap:4px; margin-bottom:6px; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+.key-btns { display:flex; gap:4px; margin-bottom:6px; flex-wrap:wrap; }
+/* TTS row — own line so nothing has to scroll */
+.speak-row { display:none; gap:4px; margin-bottom:6px; }
+.speak-row.show { display:flex; }
+.speak-row .key-btn { flex:1; text-align:center; }
 .key-btn {
   padding:6px 10px; border-radius:6px; border:1px solid var(--border);
   background:var(--bg); color:var(--text2); font-size:13px; cursor:pointer;
@@ -133,6 +137,30 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
   background:var(--red); color:#fff; border-color:var(--red);
   font-weight:600;
 }
+
+/* TTS preview panel — sits above the input bar. Shows the text that's
+   being read aloud plus a native <audio> element (play / pause / seek). */
+.tts-panel {
+  display:none; flex-direction:column; gap:6px;
+  background:var(--surface); border-top:1px solid var(--border);
+  padding:8px 10px; flex-shrink:0;
+}
+.tts-panel.show { display:flex; }
+.tts-head { display:flex; justify-content:space-between; align-items:center; }
+.tts-head .tts-label { font-size:13px; font-weight:600; color:var(--accent); }
+.tts-head .tts-status { font-size:11px; color:var(--text2); margin-left:8px; }
+.tts-close {
+  background:transparent; border:none; color:var(--text2);
+  font-size:16px; cursor:pointer; padding:0 6px; line-height:1;
+}
+.tts-text {
+  font-size:13px; color:var(--text); line-height:1.45;
+  white-space:pre-wrap; word-break:break-word;
+  max-height:20vh; overflow-y:auto;
+  background:var(--bg); border:1px solid var(--border);
+  border-radius:6px; padding:6px 8px;
+}
+#tts-audio { width:100%; height:32px; }
 
 /* Modal */
 .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center; padding:16px; }
@@ -184,6 +212,18 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
   <button type="button" class="scroll-pill" id="scroll-pill" onclick="jumpToBottom()">↓ 新输出</button>
 </div>
 
+<div class="tts-panel" id="tts-panel">
+  <div class="tts-head">
+    <div>
+      <span class="tts-label" id="tts-label">朗读</span>
+      <span class="tts-status" id="tts-status"></span>
+    </div>
+    <button class="tts-close" onclick="closeTtsPanel()" title="关闭">&#10005;</button>
+  </div>
+  <div class="tts-text" id="tts-text"></div>
+  <audio id="tts-audio" controls preload="none"></audio>
+</div>
+
 <div class="input-bar">
   <div class="nav-row">
     <button class="nav-btn" data-key="\x1b[D" data-repeat="1">&#9664;</button>
@@ -197,10 +237,11 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
     <button class="key-btn" data-key="\x1b[Z">Shift+Tab</button>
     <button class="key-btn" data-key="\x1b">Esc</button>
     <button class="key-btn" data-key="\x03">Ctrl+C</button>
-    <button class="key-btn speak-btn" id="btn-speak" onclick="speakLast()" title="朗读最后一条 Claude 消息" style="display:none">&#128266; 读</button>
-    <button class="key-btn speak-btn" id="btn-summarize" onclick="speakSummary()" title="用 Qwen 摘要后朗读" style="display:none">&#128221; 摘要</button>
-    <button class="key-btn stop-btn" id="btn-stop-tts" onclick="stopSpeak()" title="停止朗读" style="display:none">&#9209;</button>
     <button class="key-btn refresh-btn" id="btn-refresh" onclick="refreshSession()" title="Refresh terminal" style="display:none">&#8635; Refresh</button>
+  </div>
+  <div class="speak-row" id="speak-row">
+    <button class="key-btn speak-btn" id="btn-summarize" onclick="speakSummary()" title="摘要最后一条 Claude 消息并朗读" style="display:none">&#128221; 摘要朗读</button>
+    <button class="key-btn stop-btn" id="btn-stop-tts" onclick="stopSpeak()" title="停止朗读" style="display:none">&#9209;</button>
   </div>
   <div class="input-row">
     <textarea id="cmd-input" rows="1" placeholder="Type here and press Enter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
@@ -307,17 +348,17 @@ function showTerminal() {
   termEl.style.display = 'block';
   emptyEl.style.display = 'none';
   document.getElementById('btn-refresh').style.display = '';
-  document.getElementById('btn-speak').style.display = '';
   document.getElementById('btn-summarize').style.display = '';
+  document.getElementById('speak-row').classList.add('show');
   setTimeout(() => fitAddon.fit(), 50);
 }
 function hideTerminal() {
   termEl.style.display = 'none';
   emptyEl.style.display = 'flex';
   document.getElementById('btn-refresh').style.display = 'none';
-  document.getElementById('btn-speak').style.display = 'none';
   document.getElementById('btn-summarize').style.display = 'none';
   document.getElementById('btn-stop-tts').style.display = 'none';
+  document.getElementById('speak-row').classList.remove('show');
   stopSpeak();
 }
 
@@ -600,76 +641,39 @@ function wireKeyButton(btn) {
 
 document.querySelectorAll('[data-key]').forEach(wireKeyButton);
 
-// --- TTS (Text-to-Speech) ---
-// Uses the browser's built-in Web Speech API. No network cost, works on
-// Android Chrome with the system/Google TTS engine.
-const synth = window.speechSynthesis;
-let ttsVoices = [];
-function loadVoices() {
-  if (!synth) return;
-  ttsVoices = synth.getVoices();
-}
-if (synth) {
-  loadVoices();
-  synth.onvoiceschanged = loadVoices;
+// --- TTS (server-side via DashScope Qwen-TTS) ---
+// Flow: fetch last Claude message (or its summary) -> POST /api/tts ->
+// receive audio bytes -> play through <audio> element in #tts-panel. The
+// panel also shows the exact text so the user can see what's being spoken.
+const ttsAudio = document.getElementById('tts-audio');
+let ttsObjectUrl = null;
+
+function setTtsStatus(msg) {
+  document.getElementById('tts-status').textContent = msg || '';
 }
 
-// Pick the best zh-CN voice available, falling back to anything zh-*.
-function pickVoice() {
-  if (!ttsVoices.length) return null;
-  return ttsVoices.find(v => v.lang === 'zh-CN')
-      || ttsVoices.find(v => v.lang && v.lang.startsWith('zh'))
-      || null;
+function showTtsPanel(label, text) {
+  document.getElementById('tts-label').textContent = label;
+  document.getElementById('tts-text').textContent = text;
+  document.getElementById('tts-panel').classList.add('show');
 }
 
-// Android Chrome truncates long utterances. Split on sentence-ish boundaries,
-// ~180 chars each, so every chunk plays cleanly.
-function chunkForTTS(text, maxLen = 180) {
-  const out = [];
-  let buf = '';
-  const parts = text.split(/([。！？；\.\!\?;\n])/);
-  for (const p of parts) {
-    if (!p) continue;
-    if ((buf + p).length > maxLen && buf) {
-      out.push(buf);
-      buf = p;
-    } else {
-      buf += p;
-    }
-  }
-  if (buf.trim()) out.push(buf);
-  return out;
+function closeTtsPanel() {
+  ttsAudio.pause();
+  if (ttsObjectUrl) { URL.revokeObjectURL(ttsObjectUrl); ttsObjectUrl = null; }
+  ttsAudio.removeAttribute('src');
+  ttsAudio.load();
+  document.getElementById('tts-panel').classList.remove('show');
+  document.getElementById('btn-stop-tts').style.display = 'none';
+  setTtsStatus('');
 }
+window.closeTtsPanel = closeTtsPanel;
 
 function stopSpeak() {
-  if (synth) synth.cancel();
+  ttsAudio.pause();
   document.getElementById('btn-stop-tts').style.display = 'none';
 }
 window.stopSpeak = stopSpeak;
-
-function speak(text) {
-  if (!synth) { alert('此浏览器不支持语音合成'); return; }
-  if (!text || !text.trim()) { alert('没有可朗读的内容'); return; }
-  synth.cancel();
-  const voice = pickVoice();
-  const chunks = chunkForTTS(text);
-  let lastUtter = null;
-  for (const chunk of chunks) {
-    const u = new SpeechSynthesisUtterance(chunk);
-    u.lang = 'zh-CN';
-    if (voice) u.voice = voice;
-    u.rate = 1.0;
-    u.pitch = 1.0;
-    synth.speak(u);
-    lastUtter = u;
-  }
-  document.getElementById('btn-stop-tts').style.display = '';
-  if (lastUtter) {
-    lastUtter.onend = () => {
-      document.getElementById('btn-stop-tts').style.display = 'none';
-    };
-  }
-}
 
 async function fetchLastMessage() {
   if (!currentSessionId) return null;
@@ -686,18 +690,51 @@ async function fetchLastMessage() {
   }
 }
 
-async function speakLast() {
-  if (document.activeElement === cmdInput) cmdInput.blur();
-  const btn = document.getElementById('btn-speak');
-  btn.disabled = true;
+// POST text to /api/tts, receive audio blob, play it. Must be invoked inside
+// a user gesture (button click) so iOS Safari allows audio.play() without
+// prompting.
+async function ttsPlay(text) {
+  setTtsStatus('合成中...');
+  let r;
   try {
-    const text = await fetchLastMessage();
-    if (text != null) speak(text);
-  } finally {
-    btn.disabled = false;
+    r = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Authorization': AUTH, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+  } catch (e) {
+    setTtsStatus('网络错误');
+    alert('TTS 网络错误: ' + e.message);
+    return;
+  }
+  if (!r.ok) {
+    let msg = 'HTTP ' + r.status;
+    try { const j = await r.json(); if (j.error) msg = j.error; } catch {}
+    setTtsStatus('失败');
+    alert('TTS 失败: ' + msg);
+    return;
+  }
+  const blob = await r.blob();
+  if (ttsObjectUrl) URL.revokeObjectURL(ttsObjectUrl);
+  ttsObjectUrl = URL.createObjectURL(blob);
+  ttsAudio.src = ttsObjectUrl;
+  setTtsStatus('播放中');
+  document.getElementById('btn-stop-tts').style.display = '';
+  try {
+    await ttsAudio.play();
+  } catch (e) {
+    setTtsStatus('点击 ▶ 播放');
   }
 }
-window.speakLast = speakLast;
+
+ttsAudio.addEventListener('ended', () => {
+  setTtsStatus('播放完毕');
+  document.getElementById('btn-stop-tts').style.display = 'none';
+});
+ttsAudio.addEventListener('pause', () => {
+  if (!ttsAudio.ended) setTtsStatus('已暂停');
+});
+ttsAudio.addEventListener('play', () => setTtsStatus('播放中'));
 
 async function speakSummary() {
   if (document.activeElement === cmdInput) cmdInput.blur();
@@ -709,10 +746,13 @@ async function speakSummary() {
     const text = await fetchLastMessage();
     if (text == null) return;
     if (!text.trim()) { alert('没有可摘要的内容'); return; }
+    showTtsPanel('📝 正在摘要', '(原文 ' + text.length + ' 字) ' + text.slice(0, 200) + (text.length > 200 ? '…' : ''));
+    setTtsStatus('摘要中...');
     const resp = await api('POST', '/summarize', { text });
-    if (resp.error) { alert('摘要失败: ' + resp.error); return; }
-    if (!resp.summary) { alert('模型返回空摘要'); return; }
-    speak(resp.summary);
+    if (resp.error) { setTtsStatus('摘要失败'); alert('摘要失败: ' + resp.error); return; }
+    if (!resp.summary) { setTtsStatus('空摘要'); alert('模型返回空摘要'); return; }
+    showTtsPanel('📝 摘要', resp.summary);
+    await ttsPlay(resp.summary);
   } finally {
     btn.disabled = false;
     btn.innerHTML = original;
