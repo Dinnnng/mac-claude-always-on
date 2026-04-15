@@ -19,6 +19,17 @@ echo ""
 
 # 1. Prevent sleep (battery + lid close)
 echo "[1/3] Preventing Mac sleep..."
+# Clean up any prior caffeinate from a crashed run before spawning a new one,
+# otherwise the old assertion leaks and Mac never sleeps after stop.sh.
+if [ -f "$CAFF_PID_FILE" ]; then
+  OLD_CAFF=$(cat "$CAFF_PID_FILE")
+  if kill -0 "$OLD_CAFF" 2>/dev/null; then
+    kill "$OLD_CAFF" 2>/dev/null || true
+  fi
+  rm -f "$CAFF_PID_FILE"
+fi
+OLD_ORPHANS=$(pgrep -u "$USER" -f '^caffeinate -s$' 2>/dev/null || true)
+[ -n "$OLD_ORPHANS" ] && echo "$OLD_ORPHANS" | xargs kill 2>/dev/null || true
 caffeinate -s &
 echo $! > "$CAFF_PID_FILE"
 
