@@ -1,45 +1,20 @@
 # mac-claude-always-on
 
-Keep Claude Code running on your Mac — even with the lid closed. Control it from your phone.
+合上 MacBook 盖子也让 Claude Code 继续跑，用手机浏览器随时查看和操作。
 
-> Your Mac sleeps when you close the lid. Your Claude Code sessions die. This tool keeps them alive and lets you manage everything from your phone's browser.
+## 它做什么
 
-## What It Does
+- **不睡眠**：合盖 + 电池模式下保持 Mac 唤醒（`caffeinate` + `pmset`）
+- **多会话**：在不同目录同时开多个 Claude Code
+- **手机控制**：浏览器打开即用，支持完整终端（xterm.js + WebSocket）
+- **断线续看**：手机关掉再打开，历史输出还在
+- **无人值守**：可选 `--dangerously-skip-permissions` 跑通宵任务
 
-- **Prevents Mac sleep** — Keeps your Mac awake on battery with the lid closed (`caffeinate` + `pmset disablesleep`)
-- **Multiple Claude Code sessions** — Run several Claude Code instances in different project directories simultaneously
-- **Phone control** — Full terminal access from your phone's browser via WebSocket + xterm.js
-- **Session persistence** — Close your phone, come back later, output history is still there
-- **Auto mode** — Run Claude Code with `--dangerously-skip-permissions` for unattended overnight tasks
-- **Desktop GUI** — Electron app with one-click start/stop, directory picker, password setup
+## 三步上手
 
-## Architecture
+### 1. 安装
 
-```
-┌──────────────┐       HTTP / WebSocket      ┌──────────────────────────┐
-│  Phone       │ ◄─────────────────────────► │  Mac (lid closed, awake) │
-│  Browser     │   LAN / Tailscale / Hotspot │                          │
-│              │                             │  ┌─ Express HTTP server  │
-│  xterm.js    │                             │  ├─ WebSocket (realtime) │
-│  terminal    │                             │  ├─ node-pty (PTY)       │
-│              │                             │  │                       │
-│              │                             │  ├─ Session 1: claude    │
-│              │                             │  ├─ Session 2: claude    │
-│              │                             │  └─ Session N: claude    │
-│              │                             │                          │
-│              │                             │  caffeinate (anti-sleep) │
-└──────────────┘                             └──────────────────────────┘
-```
-
-## Quick Start
-
-### Prerequisites
-
-- macOS
-- Node.js >= 18
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed
-
-### Install
+需要 macOS、Node.js ≥ 18、[Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code)。
 
 ```bash
 git clone https://github.com/Dinnnng/mac-claude-always-on.git
@@ -47,152 +22,65 @@ cd mac-claude-always-on
 npm install
 ```
 
-### Option 1: Desktop App (Recommended)
+### 2. 启动桌面 App（推荐）
 
 ```bash
 npm run app
 ```
 
-A small window appears:
+在弹出的窗口里：
+1. 设个密码（手机访问用）
+2. **Browse** 选默认工作目录
+3. 点 **Start**，输入一次 Mac 密码以启用防睡眠
+4. 记下屏幕上显示的 URL
 
-1. Set a password (for phone access)
-2. Click **Browse** to pick a default directory
-3. Click **Start** — enters your Mac password once to enable sleep prevention
-4. Open the displayed URL on your phone
+> 纯命令行：`PASSWORD=你的密码 ./start.sh`（同时启用防睡眠），停止用 `./stop.sh`。
 
-### Option 2: CLI Mode
+### 3. 手机打开
 
-```bash
-PASSWORD=yourpassword node server.js
-```
+- **同一 WiFi**：直接 `http://<mac-ip>:3200`
+- **想在外网用**：装 [Tailscale](https://tailscale.com)（Mac 和手机都登同账号），用 `http://100.x.x.x:3200`
 
-Output:
+输入密码后：**+ New** 建会话 → 选目录 → （可选）填初始 prompt → 开跑。多个会话用上方 tab 切换。
 
-```
-=================================
-  Claude Remote Control
-=================================
+## 安全提醒
 
-  Password: yourpassword
+- **不要把 3200 端口暴露到公网**。只走局域网或 Tailscale。
+- `--dangerously-skip-permissions` 会让 Claude 有完全文件访问权限，只在信任的目录开。
+- 认证是 HTTP Basic Auth + WebSocket token，够用于局域网/VPN，不够用于公网。
 
-  http://192.168.1.100:3200  (en0)
+## 常见问题
 
-  Open this URL on your phone browser
-=================================
-```
+- **合盖后 WiFi 断了**：macOS 可能在合盖时关 WiFi。确认 `pmset disablesleep 1` 已生效，或用手机 USB 热点。
+- **电池掉得快**：合盖保持唤醒一直耗电，有条件就插电。
+- **Cmd+Q 后会话全没**：会话只在内存里，退出 App 就清空了。
 
-### Sleep Prevention (CLI Mode)
+## API（仅供脚本/集成参考）
 
-```bash
-# Keep Mac awake with lid closed
-./start.sh    # starts server + caffeinate + pmset
+所有接口需要 Basic Auth（`user:<password>`）。
 
-# Stop and restore sleep
-./stop.sh
-```
+| Method | Endpoint | 说明 |
+|---|---|---|
+| `POST` | `/api/sessions` | 建会话 `{ directory, autoMode }` |
+| `GET` | `/api/sessions` | 列出会话 |
+| `DELETE` | `/api/sessions/:id` | 停止并删除 |
+| `POST` | `/api/sessions/:id/resize` | 改终端尺寸 `{ cols, rows }` |
+| `GET` | `/api/directories?path=` | 浏览目录 |
+| `POST` | `/api/caffeinate/start` \| `/stop` | 开关防睡眠 |
+| `GET` | `/api/status` | 状态、电量、IP |
 
-## Phone Usage
+WebSocket：`/ws?session=<id>&token=<pass>`（终端 I/O），`/ws/events?token=<pass>`（会话事件）。
 
-1. Open your phone browser, go to `http://<mac-ip>:3200`
-2. Enter the password
-3. Tap **+ New** to create a Claude Code session
-   - Pick a directory (browseable folder list)
-   - Optionally enter an initial prompt
-   - Toggle **Auto Mode** for unattended runs
-4. Use the terminal — full input/output with special key buttons (arrows, Ctrl+C, Tab, Esc)
-5. Switch between sessions via tabs
-6. Delete sessions with the **x** button
-
-## Connecting Your Phone to Mac
-
-| Scenario | Method |
-|----------|--------|
-| Same WiFi | Direct — `http://<mac-lan-ip>:3200` |
-| Phone hotspot (USB) | Direct — Mac gets IP from phone |
-| Different networks | [Tailscale](https://tailscale.com) — free VPN, `http://100.x.x.x:3200` |
-
-### Tailscale Setup (for remote access anywhere)
-
-```bash
-# Mac
-brew install tailscale
-# Open Tailscale app, sign in
-
-# Phone
-# Install Tailscale from Play Store / App Store, sign in with same account
-
-# Get Mac's Tailscale IP
-tailscale ip
-# Use http://100.x.x.x:3200 from your phone
-```
-
-## API
-
-All endpoints require Basic Auth (`user:<password>`).
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/sessions` | Create session `{ directory, autoMode }` |
-| `GET` | `/api/sessions` | List all sessions |
-| `DELETE` | `/api/sessions/:id` | Stop and remove session |
-| `POST` | `/api/sessions/:id/resize` | Resize PTY `{ cols, rows }` |
-| `GET` | `/api/directories?path=` | Browse directories |
-| `POST` | `/api/caffeinate/start` | Start sleep prevention |
-| `POST` | `/api/caffeinate/stop` | Stop sleep prevention |
-| `GET` | `/api/status` | Server status, battery, IPs |
-
-WebSocket endpoints:
-
-| Path | Description |
-|------|-------------|
-| `/ws?session=<id>&token=<pass>` | Terminal I/O stream |
-| `/ws/events?token=<pass>` | Global events (session created/stopped/deleted) |
-
-## Tech Stack
-
-| Component | Choice | Why |
-|-----------|--------|-----|
-| Backend | Node.js + Express | Lightweight, no extra runtime |
-| Terminal | node-pty | Real PTY with color/cursor support |
-| Realtime | WebSocket (ws) | Bidirectional terminal streaming |
-| Frontend | xterm.js | Full terminal emulator in browser |
-| Desktop | Electron | Native Mac window, system dialogs |
-| Anti-sleep | caffeinate + pmset | macOS native, zero dependencies |
-| Auth | Basic Auth | Simple, sufficient for LAN/VPN |
-
-## Project Structure
+## 项目结构
 
 ```
-mac-claude-always-on/
-├── server.js        # HTTP + WebSocket server, session manager
-├── main.js          # Electron main process
-├── preload.js       # Electron preload (IPC bridge)
-├── ui.html          # Desktop control panel
-├── public/
-│   └── index.html   # Mobile web UI
-├── start.sh         # CLI launcher with sleep prevention
-├── stop.sh          # CLI stop + restore sleep
-├── package.json
-└── LICENSE
+server.js        HTTP + WebSocket + 会话管理
+main.js          Electron 主进程
+preload.js       Electron IPC 桥
+ui.html          桌面控制面板
+public/index.html  手机 Web UI
+start.sh / stop.sh  CLI 启动 / 停止（含防睡眠）
 ```
-
-## Security
-
-- Password required for all access (HTTP Basic Auth + WebSocket token)
-- Never expose port 3200 to the public internet — use Tailscale or LAN only
-- `--dangerously-skip-permissions` gives Claude Code full access — only use in trusted project directories
-- Tailscale provides end-to-end encryption automatically
-
-## Known Limitations
-
-- **Mac lid + WiFi**: macOS may disconnect WiFi when lid is closed. Use USB hotspot from phone or ensure `pmset disablesleep 1` is active
-- **Battery drain**: Keeping Mac awake with lid closed uses battery. Plug in when possible
-- **Session memory**: Sessions live in server memory. Quitting the Electron app (Cmd+Q) kills all sessions
-- **Phone input**: Mobile keyboard works but desktop is more comfortable for long commands. Use the special key buttons for arrows/Ctrl+C
-
-## Contributing
-
-Issues and PRs welcome. This is a simple tool — keep it simple.
 
 ## License
 

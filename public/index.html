@@ -107,9 +107,32 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
   user-select:none; -webkit-user-select:none; -webkit-tap-highlight-color:transparent;
 }
 .key-btn.pressed { background:var(--accent); color:#fff; border-color:var(--accent); }
-.input-row { display:flex; gap:6px; }
-.input-row input { flex:1; padding:8px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:14px; font-family:monospace; }
-.input-row input:focus { outline:none; border-color:var(--accent); }
+.input-row { display:flex; gap:6px; align-items:stretch; }
+.input-row textarea {
+  flex:1; padding:10px 12px; border-radius:6px; border:1px solid var(--border);
+  background:var(--bg); color:var(--text); font-size:16px; font-family:monospace;
+  resize:none; line-height:1.4; min-height:40px; max-height:120px;
+  -webkit-user-select:text; user-select:text;
+}
+.input-row textarea:focus { outline:none; border-color:var(--accent); }
+
+/* Refresh button in key-btns row — larger + accent color so it stands out */
+.key-btn.refresh-btn {
+  background:var(--yellow); color:#000; border-color:var(--yellow);
+  font-weight:600; padding:6px 14px; margin-left:auto;
+}
+.key-btn.refresh-btn:active { opacity:0.75; }
+
+/* TTS buttons */
+.key-btn.speak-btn {
+  background:var(--accent); color:#fff; border-color:var(--accent);
+  font-weight:600;
+}
+.key-btn.speak-btn:disabled { opacity:0.6; }
+.key-btn.stop-btn {
+  background:var(--red); color:#fff; border-color:var(--red);
+  font-weight:600;
+}
 
 /* Modal */
 .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.6); z-index:100; align-items:center; justify-content:center; padding:16px; }
@@ -145,7 +168,6 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
     <span id="activity-dot" class="activity-dot" title="Idle"></span>
     <span id="caffeinate-status" style="font-size:12px;color:var(--text2)"></span>
     <button class="btn" id="btn-caffeinate" onclick="toggleCaffeinate()">&#9889;</button>
-    <button class="btn" id="btn-refresh" onclick="refreshSession()" title="Refresh terminal" style="display:none">&#8635;</button>
     <button class="btn btn-primary" onclick="showNewModal()">+ New</button>
   </div>
 </div>
@@ -175,9 +197,13 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,system
     <button class="key-btn" data-key="\x1b[Z">Shift+Tab</button>
     <button class="key-btn" data-key="\x1b">Esc</button>
     <button class="key-btn" data-key="\x03">Ctrl+C</button>
+    <button class="key-btn speak-btn" id="btn-speak" onclick="speakLast()" title="朗读最后一条 Claude 消息" style="display:none">&#128266; 读</button>
+    <button class="key-btn speak-btn" id="btn-summarize" onclick="speakSummary()" title="用 Qwen 摘要后朗读" style="display:none">&#128221; 摘要</button>
+    <button class="key-btn stop-btn" id="btn-stop-tts" onclick="stopSpeak()" title="停止朗读" style="display:none">&#9209;</button>
+    <button class="key-btn refresh-btn" id="btn-refresh" onclick="refreshSession()" title="Refresh terminal" style="display:none">&#8635; Refresh</button>
   </div>
   <div class="input-row">
-    <input type="text" id="cmd-input" placeholder="Type here and press Enter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+    <textarea id="cmd-input" rows="1" placeholder="Type here and press Enter..." autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
     <button class="btn" onclick="sendInput()">Send</button>
   </div>
 </div>
@@ -281,22 +307,29 @@ function showTerminal() {
   termEl.style.display = 'block';
   emptyEl.style.display = 'none';
   document.getElementById('btn-refresh').style.display = '';
+  document.getElementById('btn-speak').style.display = '';
+  document.getElementById('btn-summarize').style.display = '';
   setTimeout(() => fitAddon.fit(), 50);
 }
 function hideTerminal() {
   termEl.style.display = 'none';
   emptyEl.style.display = 'flex';
   document.getElementById('btn-refresh').style.display = 'none';
+  document.getElementById('btn-speak').style.display = 'none';
+  document.getElementById('btn-summarize').style.display = 'none';
+  document.getElementById('btn-stop-tts').style.display = 'none';
+  stopSpeak();
 }
 
 function refreshSession() {
   if (!currentSessionId) return;
   const btn = document.getElementById('btn-refresh');
+  const original = btn.innerHTML;
   btn.textContent = '...';
   btn.disabled = true;
   connectSession(currentSessionId);
   setTimeout(() => {
-    btn.textContent = '\u21BB';
+    btn.innerHTML = original;
     btn.disabled = false;
   }, 800);
 }
@@ -488,13 +521,20 @@ async function createSession() {
 // --- Input bar ---
 const cmdInput = document.getElementById('cmd-input');
 cmdInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') { e.preventDefault(); sendInput(); }
+  // Shift+Enter inserts a newline; plain Enter submits.
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendInput(); }
 });
 
 function sendInput() {
   const val = cmdInput.value;
   if (!val || !ws || ws.readyState !== 1) return;
-  ws.send(val + '\r');
+  // For multi-line input, wrap in bracketed-paste so embedded newlines don't
+  // each trigger submit in the TUI. Single-line keeps original behavior.
+  if (val.includes('\n')) {
+    ws.send('\x1b[200~' + val + '\x1b[201~\r');
+  } else {
+    ws.send(val + '\r');
+  }
   cmdInput.value = '';
 }
 
@@ -527,6 +567,9 @@ function wireKeyButton(btn) {
 
   const press = (e) => {
     e.preventDefault();
+    // Dismiss the soft keyboard so nav/shortcut keys don't fight with the
+    // on-screen keyboard popping up from the focused textarea.
+    if (document.activeElement === cmdInput) cmdInput.blur();
     btn.classList.add('pressed');
     vibrate(10);
     sendKey(key);
@@ -556,6 +599,126 @@ function wireKeyButton(btn) {
 }
 
 document.querySelectorAll('[data-key]').forEach(wireKeyButton);
+
+// --- TTS (Text-to-Speech) ---
+// Uses the browser's built-in Web Speech API. No network cost, works on
+// Android Chrome with the system/Google TTS engine.
+const synth = window.speechSynthesis;
+let ttsVoices = [];
+function loadVoices() {
+  if (!synth) return;
+  ttsVoices = synth.getVoices();
+}
+if (synth) {
+  loadVoices();
+  synth.onvoiceschanged = loadVoices;
+}
+
+// Pick the best zh-CN voice available, falling back to anything zh-*.
+function pickVoice() {
+  if (!ttsVoices.length) return null;
+  return ttsVoices.find(v => v.lang === 'zh-CN')
+      || ttsVoices.find(v => v.lang && v.lang.startsWith('zh'))
+      || null;
+}
+
+// Android Chrome truncates long utterances. Split on sentence-ish boundaries,
+// ~180 chars each, so every chunk plays cleanly.
+function chunkForTTS(text, maxLen = 180) {
+  const out = [];
+  let buf = '';
+  const parts = text.split(/([。！？；\.\!\?;\n])/);
+  for (const p of parts) {
+    if (!p) continue;
+    if ((buf + p).length > maxLen && buf) {
+      out.push(buf);
+      buf = p;
+    } else {
+      buf += p;
+    }
+  }
+  if (buf.trim()) out.push(buf);
+  return out;
+}
+
+function stopSpeak() {
+  if (synth) synth.cancel();
+  document.getElementById('btn-stop-tts').style.display = 'none';
+}
+window.stopSpeak = stopSpeak;
+
+function speak(text) {
+  if (!synth) { alert('此浏览器不支持语音合成'); return; }
+  if (!text || !text.trim()) { alert('没有可朗读的内容'); return; }
+  synth.cancel();
+  const voice = pickVoice();
+  const chunks = chunkForTTS(text);
+  let lastUtter = null;
+  for (const chunk of chunks) {
+    const u = new SpeechSynthesisUtterance(chunk);
+    u.lang = 'zh-CN';
+    if (voice) u.voice = voice;
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    synth.speak(u);
+    lastUtter = u;
+  }
+  document.getElementById('btn-stop-tts').style.display = '';
+  if (lastUtter) {
+    lastUtter.onend = () => {
+      document.getElementById('btn-stop-tts').style.display = 'none';
+    };
+  }
+}
+
+async function fetchLastMessage() {
+  if (!currentSessionId) return null;
+  try {
+    const r = await fetch(`/api/sessions/${currentSessionId}/last-message`, {
+      headers: { 'Authorization': AUTH },
+    });
+    if (!r.ok) { alert('取最后消息失败: ' + r.status); return null; }
+    const data = await r.json();
+    return data.text || '';
+  } catch (e) {
+    alert('网络错误: ' + e.message);
+    return null;
+  }
+}
+
+async function speakLast() {
+  if (document.activeElement === cmdInput) cmdInput.blur();
+  const btn = document.getElementById('btn-speak');
+  btn.disabled = true;
+  try {
+    const text = await fetchLastMessage();
+    if (text != null) speak(text);
+  } finally {
+    btn.disabled = false;
+  }
+}
+window.speakLast = speakLast;
+
+async function speakSummary() {
+  if (document.activeElement === cmdInput) cmdInput.blur();
+  const btn = document.getElementById('btn-summarize');
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = '...';
+  try {
+    const text = await fetchLastMessage();
+    if (text == null) return;
+    if (!text.trim()) { alert('没有可摘要的内容'); return; }
+    const resp = await api('POST', '/summarize', { text });
+    if (resp.error) { alert('摘要失败: ' + resp.error); return; }
+    if (!resp.summary) { alert('模型返回空摘要'); return; }
+    speak(resp.summary);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = original;
+  }
+}
+window.speakSummary = speakSummary;
 
 // --- Caffeinate ---
 async function loadStatus() {

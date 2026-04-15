@@ -3,3 +3,4 @@ node_modules/
 .claude-remote.pid
 .caffeinate.pid
 *.log
+.env

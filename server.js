@@ -4,13 +4,38 @@ const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
 const path = require('path');
 const os = require('os');
+const fs = require('fs');
 const { execSync, spawn } = require('child_process');
 const crypto = require('crypto');
+
+// --- .env loader (no dependency) ---
+function loadEnvFile(file) {
+  try {
+    const content = fs.readFileSync(file, 'utf-8');
+    for (const rawLine of content.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith('#')) continue;
+      const idx = line.indexOf('=');
+      if (idx < 0) continue;
+      const key = line.slice(0, idx).trim();
+      let val = line.slice(idx + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) ||
+          (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (!(key in process.env)) process.env[key] = val;
+    }
+  } catch { /* no .env is fine */ }
+}
+loadEnvFile(path.join(__dirname, '.env'));
 
 // --- Config ---
 let PORT = process.env.PORT || 3200;
 let PASSWORD = process.env.PASSWORD || crypto.randomBytes(4).toString('hex');
 const BUFFER_SIZE = 100 * 1024; // 100KB scrollback per session
+const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY || '';
+const DASHSCOPE_MODEL = process.env.DASHSCOPE_MODEL || 'qwen-flash';
+const DASHSCOPE_ENDPOINT = 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions';
 
 // --- Auth ---
 function checkAuth(req, res) {
@@ -194,6 +219,113 @@ app.post('/api/sessions/:id/resize', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// --- Last Claude message extraction ---
+// Strip ANSI CSI/OSC/SS2/SS3 sequences and control chars we don't need.
+function stripAnsi(s) {
+  return s
+    .replace(/\x1b\[[\d;?]*[A-Za-z]/g, '')      // CSI
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '') // OSC
+    .replace(/\x1b[PX^_][^\x1b]*\x1b\\/g, '')   // DCS/PM/APC/SOS
+    .replace(/\x1b[()*+][\w]/g, '')              // charset
+    .replace(/\x1b[=>NO]/g, '')
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ''); // C0 except \t\n\r
+}
+
+// Pull the last Claude "message" (a `●` block) out of a session's raw buffer.
+// Claude Code TUI marks assistant messages with `●` and user input with a `╭─╮`
+// box. Everything between the last `●` and the next box / next `●` / end is
+// the last message. If no `●` is found, fall back to the last meaningful lines.
+function extractLastClaudeMessage(rawBuf) {
+  const text = stripAnsi(rawBuf.toString('utf-8')).replace(/\r/g, '');
+  const lines = text.split('\n');
+
+  let startIdx = -1;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    // `●` may be preceded by whitespace or color reset. After stripAnsi it's
+    // usually the first non-space char of the line.
+    if (/^\s*●/.test(lines[i])) { startIdx = i; break; }
+  }
+
+  const cleanLine = (l) =>
+    l.replace(/^[\s│╭╰╮╯─┌┐└┘├┤┬┴┼]+/, '')
+     .replace(/[\s│]+$/, '')
+     .trim();
+
+  if (startIdx === -1) {
+    // No bullet — take the last 15 meaningful lines as a fallback.
+    const meaningful = lines
+      .map(cleanLine)
+      .filter(l => l && !/^[─╭╰╮╯│=]+$/.test(l) && !l.startsWith('>'));
+    return meaningful.slice(-15).join('\n').trim();
+  }
+
+  // Find end: next assistant bullet, tool-result glyph, or input box start.
+  let endIdx = lines.length;
+  for (let i = startIdx + 1; i < lines.length; i++) {
+    const t = lines[i];
+    if (/╭/.test(t)) { endIdx = i; break; }
+    if (/^\s*●/.test(t) && i !== startIdx) { endIdx = i; break; }
+  }
+
+  const segment = lines.slice(startIdx, endIdx)
+    .map(cleanLine)
+    .filter(l => l && !/^[─╭╰╮╯│=]+$/.test(l));
+
+  // Drop the leading `●` glyph on the first line.
+  if (segment.length > 0) segment[0] = segment[0].replace(/^●\s*/, '');
+
+  return segment.join('\n').trim();
+}
+
+app.get('/api/sessions/:id/last-message', (req, res) => {
+  const s = sessions.get(req.params.id);
+  if (!s) return res.status(404).json({ error: 'Not found' });
+  const text = extractLastClaudeMessage(s.buffer);
+  res.json({ text, length: text.length });
+});
+
+// --- Summarize via DashScope (Qwen) ---
+app.post('/api/summarize', async (req, res) => {
+  if (!DASHSCOPE_API_KEY) {
+    return res.status(400).json({ error: 'DASHSCOPE_API_KEY not set in .env' });
+  }
+  const { text } = req.body || {};
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: 'Missing text' });
+  }
+  try {
+    const resp = await fetch(DASHSCOPE_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + DASHSCOPE_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: DASHSCOPE_MODEL,
+        messages: [
+          {
+            role: 'system',
+            content: '你是一个语音播报助手。用口语化中文，100字以内，概括用户给你的 Claude Code 输出内容，适合朗读。不要使用 markdown、代码块、列表符号。不要加开场白。',
+          },
+          { role: 'user', content: text.slice(0, 8000) },
+        ],
+        enable_thinking: false,
+        stream: false,
+        temperature: 0.3,
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      return res.status(502).json({ error: `DashScope ${resp.status}: ${body.slice(0, 300)}` });
+    }
+    const data = await resp.json();
+    const summary = data.choices?.[0]?.message?.content?.trim() || '';
+    res.json({ summary, model: DASHSCOPE_MODEL });
+  } catch (err) {
+    res.status(500).json({ error: String(err.message || err) });
+  }
+});
+
 // Caffeinate API
 app.post('/api/caffeinate/start', (req, res) => {
   res.json(startCaffeinate());
@@ -207,7 +339,6 @@ app.post('/api/caffeinate/stop', (req, res) => {
 app.get('/api/directories', (req, res) => {
   const base = req.query.path ? req.query.path.replace('~', os.homedir()) : os.homedir();
   try {
-    const fs = require('fs');
     const entries = fs.readdirSync(base, { withFileTypes: true })
       .filter(e => e.isDirectory() && !e.name.startsWith('.'))
       .map(e => ({ name: e.name, path: path.join(base, e.name) }))
